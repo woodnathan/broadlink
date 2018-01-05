@@ -1,130 +1,94 @@
 package broadlink
 
 import (
-	"errors"
-	"fmt"
-	"net"
-	"strconv"
-	"strings"
-	"time"
+  "log"
+  "net"
+  "time"
+  "errors"
 )
 
+const DISCOVERY_PORT = 80
+
 type Manager struct {
-	con *net.UDPConn
-	Rm  *BaseDevice
+  conn *net.UDPConn
+  laddr *net.UDPAddr
+  devices []Device
 }
 
-func Discover(timeout time.Duration) (devs []Device, err error) {
-	devs = make([]Device, 0)
-	mc_addr := &net.UDPAddr{
-		IP:   net.IPv4bcast,
-		Port: 80,
-	}
+func NewManager() ( *Manager, error ) {
+  udpconn, err := net.ListenUDP( "udp", nil )
+  if err != nil {
+    return nil, err
+  }
 
-	var udpcon *net.UDPConn
-	udpcon, err = net.ListenUDP("udp", nil)
-	if err != nil {
-		return
-	}
+  laddr := GetLocalAddr()
 
-	//ip and port
-	ip_port := strings.SplitN(GetLocalAddr().String(), ":", 2)
-	localip := ip_port[0]
-	source_port, _ := strconv.Atoi(ip_port[1])
-	address := strings.Split(localip, ".")
-	ip_1, _ := strconv.Atoi(address[0])
-	ip_2, _ := strconv.Atoi(address[1])
-	ip_3, _ := strconv.Atoi(address[2])
-	ip_4, _ := strconv.Atoi(address[3])
-
-	//time
-	starttime := time.Now()
-	_, timezone := starttime.Zone()
-	timezone = timezone / 3600
-	year := starttime.Year()
-
-	//packet
-	packet := [0x30]byte{}
-	if timezone < 0 {
-		packet[0x08] = byte(0xff + timezone - 1)
-		packet[0x09] = 0xff
-		packet[0x0a] = 0xff
-		packet[0x0b] = 0xff
-	} else {
-		fmt.Println(timezone)
-		packet[0x08] = byte(timezone)
-		packet[0x09] = 0
-		packet[0x0a] = 0
-		packet[0x0b] = 0
-	}
-
-	packet[0x0c] = byte(year & 0xff)
-	packet[0x0d] = byte(year >> 8)
-	packet[0x0e] = byte(starttime.Minute())
-	packet[0x0f] = byte(starttime.Hour())
-	packet[0x10] = byte(year % 1000)
-	packet[0x11] = byte(starttime.Weekday())
-	packet[0x12] = byte(starttime.Day())
-	packet[0x13] = byte(starttime.Month())
-	packet[0x18] = byte(ip_1)
-	packet[0x19] = byte(ip_2)
-	packet[0x1a] = byte(ip_3)
-	packet[0x1b] = byte(ip_4)
-	packet[0x1c] = byte(source_port & 0xff)
-	packet[0x1d] = byte(source_port >> 8)
-	packet[0x26] = 6
-
-	//checksum
-	checksum := getCheckSum(packet[:])
-	packet[0x20] = byte(checksum & 0xff)
-	packet[0x21] = byte(checksum >> 8)
-
-	fmt.Printf("packet: %v\n", packet)
-
-	//udpcon.SetDeadline(starttime.Add(timeout))
-	udpcon.WriteTo(packet[:], mc_addr)
-
-	//read
-	udpcon.SetReadDeadline(time.Now().Add(timeout))
-	resp := make([]byte, 1024)
-
-	var size int
-	var raddr net.Addr
-	size, raddr, err = udpcon.ReadFrom(resp)
-	if err != nil {
-		return
-	}
-
-	fmt.Printf("get %d bytes from %s\n", size, raddr.String())
-	if size == 0 {
-		err = errors.New("can't read anything!")
-		return
-	}
-
-	fmt.Println(resp[:size])
-
-	host := raddr.String()
-	devtype := uint16(resp[0x34]) | uint16(resp[0x35])<<8
-	mac := resp[0x3a:0x40]
-
-	bd := newBaseDevice(udpcon, host, mac)
-	dev := bd.newDevice(devtype)
-	devs = append(devs, dev)
-
-	return
+  return &Manager{
+    conn: udpconn,
+    laddr: laddr,
+  }, nil
 }
 
-func GetLocalAddr() net.Addr {
-	udpcon, err := net.DialUDP("udp",
-		nil,
-		&net.UDPAddr{
-			IP:   net.ParseIP("8.8.8.8"),
-			Port: 53,
-		})
-	if err != nil {
-		panic(err)
-	}
-	defer udpcon.Close()
+func ( m *Manager ) Discover( timeout time.Duration ) ( devices []Device, err error ) {
+  devices = make( []Device, 0 )
 
-	return udpcon.LocalAddr()
+  mcaddr := &net.UDPAddr{
+    IP:   net.IPv4bcast,
+    Port: DISCOVERY_PORT,
+  }
+
+  // broadcast
+  dp := NewDiscoveryPacket( time.Now(), m.laddr )
+  m.conn.WriteTo( dp.Bytes(), mcaddr )
+
+  //read
+  m.conn.SetReadDeadline( time.Now().Add( timeout ) )
+  resp := make( []byte, 1024 )
+
+  for {
+    size, raddr, err := m.conn.ReadFrom( resp )
+    if err != nil {
+      return devices, err
+    }
+    // if err, ok := err.(net.Error); ok && err.Timeout() {
+    //   return
+    // }
+    
+    if size == 0 {
+      err = errors.New( "Unable to read discovery response" )
+      return devices, err
+    }
+
+    host := raddr.String()
+    dr := NewDiscoveryResponse( resp )
+
+    bd := newBaseDevice( m.conn, host, dr.MAC )
+    dev := bd.newDevice( dr.DeviceType )
+    m.devices = append( m.devices, dev )
+
+    break // Use channels to push out new devices
+  }
+
+  return m.devices, nil
+}
+
+func GetLocalAddr() *net.UDPAddr {
+  udpcon, err := net.DialUDP( "udp",
+    nil,
+    &net.UDPAddr{
+      IP:   net.ParseIP("8.8.8.8"),
+      Port: 53,
+    },
+  )
+  if err != nil {
+    log.Fatalf( "Failed to obtain local address: %s\n", err )
+  }
+  defer udpcon.Close()
+
+  laddr := udpcon.LocalAddr()
+  ludpaddr, err := net.ResolveUDPAddr( laddr.Network(), laddr.String() )
+  if err != nil {
+    log.Fatalf( "Failed to resolve local UDP address: %s\n", err )
+  }
+  return ludpaddr
 }

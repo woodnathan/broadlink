@@ -1,12 +1,17 @@
 package main
 
 import (
-	"github.com/xuebing1110/broadlink"
+	"github.com/woodnathan/broadlink"
 	"time"
 )
 
 func main() {
-	devs, err := broadlink.Discover(5 * time.Second)
+	manager, err := broadlink.NewManager()
+	if err != nil {
+		panic(err)
+	}
+
+	devs, err := manager.Discover( 5 * time.Second )
 	if err != nil {
 		panic(err)
 	}
