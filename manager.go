@@ -39,14 +39,18 @@ func ( m *Manager ) Discover( timeout time.Duration ) ( devices []Device, err er
 
   // broadcast
   dp := NewDiscoveryPacket( time.Now(), m.laddr )
-  m.conn.WriteTo( dp.Bytes(), mcaddr )
+  dps, err := dp.Bytes()
+  if err != nil {
+    return devices, err
+  }
+  m.conn.WriteTo( dps, mcaddr )
 
   //read
   m.conn.SetReadDeadline( time.Now().Add( timeout ) )
   resp := make( []byte, 1024 )
 
   for {
-    size, raddr, err := m.conn.ReadFrom( resp )
+    size, raddr, err := m.conn.ReadFromUDP( resp )
     if err != nil {
       return devices, err
     }
@@ -59,10 +63,12 @@ func ( m *Manager ) Discover( timeout time.Duration ) ( devices []Device, err er
       return devices, err
     }
 
-    host := raddr.String()
     dr := NewDiscoveryResponse( resp )
 
-    bd := newBaseDevice( m.conn, host, dr.MAC )
+    bd, err := newBaseDevice( raddr, dr.MAC )
+    if err != nil {
+      return devices, err
+    }
     dev := bd.newDevice( dr.DeviceType )
     m.devices = append( m.devices, dev )
 
