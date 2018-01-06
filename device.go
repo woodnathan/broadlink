@@ -15,7 +15,9 @@ type HardwareAddress []byte
 type Device interface{
   MAC() HardwareAddress
   DeviceID() DeviceID
+  PacketCount() uint16
   Encrypt( ps []byte ) ( []byte, error )
+  Decrypt( ps []byte ) ( []byte, error )
 }
 
 type BaseDevice struct {
@@ -38,6 +40,11 @@ func ( bd *BaseDevice ) DeviceID() DeviceID {
   return bd.id
 }
 
+func ( bd *BaseDevice ) PacketCount() uint16 {
+  bd.count = ( bd.count + 1 ) & 0xffff
+  return bd.count
+}
+
 func ( bd *BaseDevice ) Encrypt( ps []byte ) ( []byte, error ) {
   block, err := aes.NewCipher( bd.key )
   if err != nil {
@@ -47,6 +54,17 @@ func ( bd *BaseDevice ) Encrypt( ps []byte ) ( []byte, error ) {
   mode := cipher.NewCBCEncrypter( block, bd.iv )
   mode.CryptBlocks( ciphertext, ps )
   return ciphertext, nil
+}
+
+func ( bd *BaseDevice ) Decrypt( ps []byte ) ( []byte, error ) {
+  block, err := aes.NewCipher(bd.key)
+  if err != nil {
+    return []byte{}, err
+  }
+  deciphertext := make( []byte, len( ps ) )
+  mode := cipher.NewCBCDecrypter( block, bd.iv )
+  mode.CryptBlocks( deciphertext, ps )
+  return deciphertext, nil
 }
 
 func newBaseDevice( raddr *net.UDPAddr, mac HardwareAddress ) ( *BaseDevice, error ) {
@@ -82,88 +100,87 @@ func (bd *BaseDevice) newDevice(devtype uint16) (dev Device) {
 }
 
 func (bd *BaseDevice) Auth() error {
-  payload := make([]byte, 0x50)
-  payload[0x04] = 0x31
-  payload[0x05] = 0x31
-  payload[0x06] = 0x31
-  payload[0x07] = 0x31
-  payload[0x08] = 0x31
-  payload[0x09] = 0x31
-  payload[0x0a] = 0x31
-  payload[0x0b] = 0x31
-  payload[0x0c] = 0x31
-  payload[0x0d] = 0x31
-  payload[0x0e] = 0x31
-  payload[0x0f] = 0x31
-  payload[0x10] = 0x31
-  payload[0x11] = 0x31
-  payload[0x12] = 0x31
-  payload[0x1e] = 0x01
-  payload[0x2d] = 0x01
-  payload[0x30] = 'T'
-  payload[0x31] = 'e'
-  payload[0x32] = 's'
-  payload[0x33] = 't'
-  payload[0x34] = ' '
-  payload[0x35] = ' '
-  payload[0x36] = '1'
+  command := NewAuthCommand()
 
-  response, err := bd.SendPacket(0x65, payload)
+  response, err := bd.SendCommand( command )
   if err != nil {
     return err
   }
 
-  fmt.Printf("auth resp:%v\n", response)
+  fmt.Printf( "auth resp data:%v\n", response )
 
-  //decode
-  enc_payload := response[0x38:]
-  if len(enc_payload) == 0 {
-    return errors.New("auth failed!!!")
-  }
-
-  fmt.Printf("auth resp data:%v\n", response[:0x38])
-
-  //aes = AES.new(bytes(self.key), AES.MODE_CBC, bytes(self.iv))
-  //payload = aes.decrypt(bytes(enc_payload))
-  block, aes_err := aes.NewCipher(bd.key)
-  if aes_err != nil {
-    return aes_err
-  }
-  mode := cipher.NewCBCDecrypter(block, bd.iv)
-  respdata := make([]byte, len(enc_payload))
-  mode.CryptBlocks(respdata, enc_payload)
-
-  fmt.Printf("auth resp data:%v\n", respdata)
-
-  bd.id = respdata[0x00:0x04]
-  bd.key = respdata[0x04:0x14]
+  bd.id = response[0x00:0x04]
+  bd.key = response[0x04:0x14]
 
   return nil
 }
 
-func ( bd *BaseDevice ) SendPacket( command byte, payload []byte ) ( resp []byte, err error ) {
-  bd.count = ( bd.count + 1 ) & 0xffff
-  cp := NewCommandPacket( bd, uint16(command), bd.count, payload )
+func ( bd *BaseDevice ) EnterLearning() ( []byte, error ) {
+  command := NewEnterLearningCommand()
+
+  response, err := bd.SendCommand( command )
+
+  return response, err
+}
+
+func ( bd *BaseDevice ) CheckData() ( []byte, error ) {
+  command := NewCheckDataCommand()
+
+  response, err := bd.SendCommand( command )
+  if err != nil {
+    return response, err
+  }
+
+  return response[0x04:], err
+}
+
+func ( bd *BaseDevice ) SendData( data []byte ) error {
+  command := NewSendDataCommand( data )
+
+  _, err := bd.SendCommand( command )
+
+  return err
+}
+
+func ( bd *BaseDevice ) SendCommand( command Command ) ( resp []byte, err error ) {
+  resp = []byte{}
+
+  cp := NewCommandPacket( bd, command )
 
   cps, err := cp.Bytes()
   if err != nil {
-    return []byte{}, err
-  }
-
-  _, werr := bd.conn.WriteToUDP( cps, bd.raddr )
-  if werr != nil {
-    err = werr
     return
   }
 
-  resp = make( []byte, 1024 )
-
-  size, raddr, rerr := bd.conn.ReadFrom( resp )
-  if rerr != nil {
-    err = rerr
+  _, err = bd.conn.WriteToUDP( cps, bd.raddr )
+  if err != nil {
     return
   }
-  fmt.Printf("get %d bytes from %s\n", size, raddr.String())
 
-  return resp[0:size], nil
+  resp = make( []byte, 1024 ) // Is 1024 too small?
+
+  size, _, err := bd.conn.ReadFrom( resp )
+  if err != nil {
+    return
+  }
+
+  ps := resp[0:size]
+  errcode := ps[0x22]
+  if errcode != 0 {
+    err = fmt.Errorf( "Response error code was non-zero: 0x%X", errcode )
+    return
+  }
+
+  payload := ps[0x38:]
+  if len(payload)  == 0 {
+    err = errors.New( "Response contained empty payload" )
+    return
+  }
+
+  payload, err = bd.Decrypt( payload )
+  if err != nil {
+    return
+  }
+
+  return payload, nil
 }
