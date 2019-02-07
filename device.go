@@ -10,10 +10,9 @@ import (
 )
 
 type DeviceID []byte
-type HardwareAddress []byte
 
 type Device interface{
-  MAC() HardwareAddress
+  MAC() net.HardwareAddr
   DeviceID() DeviceID
   PacketCount() uint16
   Encrypt( ps []byte ) ( []byte, error )
@@ -25,14 +24,14 @@ type BaseDevice struct {
   count uint16
 
   raddr *net.UDPAddr
-  mac  HardwareAddress
+  mac  net.HardwareAddr
 
   key []byte
   iv  []byte
   id  DeviceID
 }
 
-func ( bd *BaseDevice ) MAC() HardwareAddress {
+func ( bd *BaseDevice ) MAC() net.HardwareAddr {
   return bd.mac
 }
 
@@ -67,7 +66,7 @@ func ( bd *BaseDevice ) Decrypt( ps []byte ) ( []byte, error ) {
   return deciphertext, nil
 }
 
-func newBaseDevice( raddr *net.UDPAddr, mac HardwareAddress ) ( *BaseDevice, error ) {
+func newBaseDevice( raddr *net.UDPAddr, mac net.HardwareAddr ) ( *BaseDevice, error ) {
   udpconn, err := net.ListenUDP( "udp", nil )
   if err != nil {
     return nil, err
@@ -87,12 +86,17 @@ func newBaseDevice( raddr *net.UDPAddr, mac HardwareAddress ) ( *BaseDevice, err
 }
 
 func (bd *BaseDevice) newDevice(devtype uint16) (dev Device) {
-  fmt.Printf("devtype:%x host:%s mac:%x\n", devtype, bd.raddr.String(), bd.MAC)
+  // Doesn't seem to correctly discover without this line
+  // Probably a timing issue of some kind
+  fmt.Printf("devtype:%x host:%s mac:%s\n", devtype, bd.raddr.String(), bd.mac.String())
 
   switch devtype {
+  // RM Pro
+  case 0x279d:
+    dev = newRMPro(bd)
   // RM Mini
   case 0x2737:
-    dev = newRM(bd)
+    dev = newRMMini(bd)
   default:
   }
 
@@ -165,7 +169,7 @@ func ( bd *BaseDevice ) SendCommand( command Command ) ( resp []byte, err error 
   }
 
   ps := resp[0:size]
-  errcode := ps[0x22]
+  errcode := uint16( ps[0x22] ) | uint16( ps[0x23]) << 8
   if errcode != 0 {
     err = fmt.Errorf( "Response error code was non-zero: 0x%X", errcode )
     return

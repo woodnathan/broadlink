@@ -76,7 +76,15 @@ func ( p packetDiscovery ) Bytes() ( []byte, error ) {
 
 func NewDiscoveryResponse( packet []byte ) DiscoveryResponse {
   devtype := uint16( packet[0x34] ) | uint16( packet[0x35] ) << 8
-  mac := packet[0x3a:0x40]
+  mac := []byte{
+    packet[0x3f],
+    packet[0x3e],
+    packet[0x3d],
+    packet[0x3c],
+    packet[0x3b],
+    packet[0x3a],
+  }
+
   return DiscoveryResponse{
     DeviceType: devtype,
     MAC: mac,

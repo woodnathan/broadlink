@@ -117,3 +117,23 @@ func ( ac *commandSendData ) Bytes() ( []byte, error ) {
 
   return bs, nil
 }
+
+// Check Temperature
+
+type commandCheckTemperature struct {
+  baseCommand
+}
+
+func NewCheckTemperatureCommand( data []byte ) Command {
+  return &commandCheckTemperature{
+    baseCommand{ 0x006a },
+  }
+}
+
+func ( ac *commandCheckTemperature ) Bytes() ( []byte, error ) {
+  ba := [0x10]byte{ 0 }
+
+  ba[0x00] = 0x01
+
+  return ba[:], nil
+}

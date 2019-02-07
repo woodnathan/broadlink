@@ -51,12 +51,12 @@ func ( m *Manager ) Discover( timeout time.Duration ) ( devices []Device, err er
 
   for {
     size, raddr, err := m.conn.ReadFromUDP( resp )
+    if err, ok := err.(net.Error); ok && err.Timeout() {
+      break
+    }
     if err != nil {
       return devices, err
     }
-    // if err, ok := err.(net.Error); ok && err.Timeout() {
-    //   return
-    // }
     
     if size == 0 {
       err = errors.New( "Unable to read discovery response" )
@@ -72,7 +72,7 @@ func ( m *Manager ) Discover( timeout time.Duration ) ( devices []Device, err er
     dev := bd.newDevice( dr.DeviceType )
     m.devices = append( m.devices, dev )
 
-    break // Use channels to push out new devices
+    //break // Use channels to push out new devices
   }
 
   return m.devices, nil
